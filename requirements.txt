@@ -1,0 +1,5 @@
+# StayAwake dependencies
+winsdk>=1.0.0b10
+keyboard>=0.13.5
+psutil>=6.1.0
+# winsdk pulls winrt-* packages (Windows.Media.Control etc) transitively
