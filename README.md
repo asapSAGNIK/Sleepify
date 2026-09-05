@@ -1,131 +1,167 @@
-# StayAwake — Spotify-aware lid-close sleep control (Windows)
+# StayAwake — Spotify-aware lid-close sleep control (Cross-Platform)
 
-Silent Windows background utility that keeps your laptop awake with the lid closed **only** while Spotify is playing. Otherwise it behaves exactly like stock Windows.
+Silent background utility that keeps your laptop awake with the lid closed **only** while Spotify is playing. Otherwise it behaves exactly like stock OS.
 
 ## How it works
 
 | Condition | Lid closed | Behavior |
 |-----------|------------|----------|
-| Spotify **playing** | closed | **Stay awake indefinitely** — `SetThreadExecutionState(ES_AWAYMODE)` + lid-action set to *Do nothing* (0) |
-| Spotify **never played** this session | closed | **Sleep immediately** — stock Windows, tool never touches power settings |
-| Spotify **paused/stopped** after playing | closed | 5-minute grace period → if still paused & lid still closed, **restore lid setting + force sleep** |
-| Spotify **paused**, lid **open** | open | Grace expires → restore lid setting but **do NOT force sleep** |
+| Spotify **playing** | closed | **Stay awake indefinitely** — hold `caffeinate`/`systemd-inhibit`/`SetThreadExecutionState` + lid `Do nothing` (0) |
+| Spotify **never played** this session | closed | **Sleep immediately** — stock OS, never touches power settings |
+| Spotify **app closed** | closed | **Immediate restore + sleep** — code stops, lid `Sleep` (1), normal sleep |
+| Spotify **paused/stopped + lid closed + no playback** | closed | **Immediate restore + sleep** — flap shut + no playback = normal sleep (code stops) |
+| Spotify **paused + lid open + no playback** | open | **Immediate restore, no sleep** — back to default, will sleep on next lid close |
 
-Also: `Ctrl+Alt+S` toggles the whole tool on/off (beep confirms).
+Tool is **idle** when Spotify not running (`poll 60s`, ~0% CPU), **active** when Spotify runs (`poll 12s`). Hotkey `Ctrl+Shift+Space` (Win/Linux) / `Cmd+Shift+Space` (Mac) toggles on/off with custom sounds `assets/sounds/on.wav`/`off.wav`.
+
+## Structure (same logic on all OS, separated dirs)
+
+```
+spotifysleeptool/
+  core/                     # shared config (HOTKEY, POLL, GRACE) — single source
+  windows/                  # Windows working dir (powrprof, GSMTC, RegisterHotKey)
+    stayawake.py            # main entry for Windows
+    install.ps1 / uninstall.ps1
+    requirements.txt
+  mac/                      # macOS working dir (caffeinate, osascript, ioreg, launchd)
+    stayawake.py
+    install.sh / uninstall.sh
+    requirements.txt
+  linux/                    # Linux working dir (systemd-inhibit, playerctl, /proc/acpi, systemd)
+    stayawake.py
+    install.sh / uninstall.sh
+    requirements.txt
+  assets/sounds/            # shared custom sounds (on.wav/off.wav for all OS)
+    on.wav  # enabled
+    off.wav # disabled
+```
 
 ## Requirements
 
-- Windows 10/11
-- Python 3.10+ (python + pythonw)
-- Spotify Desktop app (not web)
-- Administrator (Task Scheduler runs elevated)
+- **Windows:** 10/11, Python 3.10+ (python + pythonw), Spotify Desktop, Admin (Task Scheduler)
+- **Mac:** 13+, Python 3.10+, Spotify Desktop, `pip install -r mac/requirements.txt` (psutil, pynput, pyobjc)
+- **Linux:** Python 3.10+, Spotify Desktop, `playerctl` (`sudo apt install playerctl`), `pip install -r linux/requirements.txt` + `systemd --user`
 
 ## Install
 
+**Windows (Admin PowerShell):**
 ```powershell
-# 1. Install dependencies
-pip install -r requirements.txt
-
-# 2. Install Task Scheduler entry (run as Administrator)
-powershell -ExecutionPolicy Bypass -File install.ps1
-
+cd D:\spotifysleeptool
+pip install -r windows\requirements.txt
+powershell -ExecutionPolicy Bypass -File windows\install.ps1
 # Verify:
-powercfg /q SCHEME_CURRENT SUB_BUTTONS
-# Lid close action should show 1 (Sleep) before playing
+powercfg /q SCHEME_CURRENT SUB_BUTTONS  # Lid should be 1 (Sleep) when idle
 Get-ScheduledTask -TaskName StayAwake
 Get-Content $env:APPDATA\StayAwake\stayawake.log -Tail 20
 ```
 
-The task runs at logon with **Run with highest privileges**, `pythonw stayawake.py` silently.
+**Mac:**
+```bash
+cd /path/to/spotifysleeptool
+pip3 install -r mac/requirements.txt
+bash mac/install.sh  # launchd LaunchAgent
+launchctl list | grep StayAwake
+cat ~/Library/Application\ Support/StayAwake/stayawake.log
+```
+
+**Linux:**
+```bash
+cd /path/to/spotifysleeptool
+pip3 install -r linux/requirements.txt
+# sudo apt install playerctl  # for Spotify MPRIS
+bash linux/install.sh  # systemd --user
+systemctl --user status stayawake
+journalctl --user -u stayawake -f
+```
+
+**Direct run (no install, any OS):**
+```bash
+# Windows:
+python windows/stayawake.py --no-elevate
+# Mac:
+python3 mac/stayawake.py --no-elevate
+# Linux:
+python3 linux/stayawake.py --no-elevate
+# Fast test (any):
+python windows/stayawake.py --no-elevate --grace 1 --poll 5
+```
+
+The task/service runs at logon with `KeepAlive`/`Restart` and `hotkey ctrl+shift+space` to toggle.
 
 ## Manual run (testing)
 
-```powershell
-# Run in foreground with logging (no elevation needed for basic read, but writes need admin)
-python stayawake.py --no-elevate
-
-# Custom grace/poll for quick testing
-python stayawake.py --no-elevate --grace 1 --poll 5   # 1-min grace, 5s poll
-python stayawake.py --grace=1 --poll=5 --no-beep
-
-# Check lid value: 0=Do nothing, 1=Sleep, 2=Hibernate, 3=Shut down
-powercfg /q SCHEME_CURRENT SUB_BUTTONS   # needs -attributes -ATTRIB_HIDE once, installer does it
-# or via registry:
-reg query "HKLM\SYSTEM\CurrentControlSet\Control\Power\PowerSettings\4f971e89-eebd-4455-a8de-9e59040e7347\5ca83367-6e45-459f-a27b-476b1d01c936" /s
+```bash
+# Windows foreground:
+python windows/stayawake.py --no-elevate
+# Mac:
+python3 mac/stayawake.py --no-elevate
+# Linux:
+python3 linux/stayawake.py --no-elevate
+# Custom poll/grace:
+python windows/stayawake.py --no-elevate --grace 1 --poll 5 --no-beep
 ```
 
 ## Hotkey
 
-- `Ctrl+Alt+S` anywhere → toggle enabled/disabled.
-- Two ascending beeps = **ON**, single low beep = **OFF**.
-- Toast notifications were unreliable (Python AppUserModelID issue) so beep is the primary feedback; no window/tray needed.
-- Implementation uses `RegisterHotKey` + `RegisterPowerSettingNotification` in a hidden window; falls back to `keyboard` lib if registration conflicts.
+- `Ctrl+Shift+Space` (Win/Linux) / `Cmd+Shift+Space` (Mac) anywhere → toggle.
+- `on.wav` (1.6s) = ON, `off.wav` (1.6s) = OFF (from `assets/sounds/`). Fallback to system beep if files missing.
+- Implementation: `RegisterHotKey` + `RegisterPowerSettingNotification` on Windows, `pynput`/`keyboard` fallback with debounce 0.7s on all OS.
 
-## Files
+## Files — Working dirs are `windows/` `mac/` `linux/` (no root dispatcher)
 
-- `stayawake.py` — main utility (single file, all config at top)
-- `requirements.txt`
-- `install.ps1` — Task Scheduler installer (highest privileges, logon trigger, restart on failure)
-- `uninstall.ps1` — removes task, restores lid, kills process
-- `test_simulation.py` — fast state-machine simulation (mock sleep/power, 10s grace)
+- `core/config.py` — shared HOTKEY/POLL/GRACE (single source, all OS)
+- `windows/stayawake.py` — Windows working dir, `windows/install.ps1` Task Scheduler
+- `mac/stayawake.py` — Mac working dir, `mac/install.sh` launchd
+- `linux/stayawake.py` — Linux working dir, `linux/install.sh` systemd
+- `assets/sounds/on.wav`/`off.wav` — shared custom sounds (all OS)
+- `windows/test_simulation.py` — state-machine simulation
 
-## Testing checklist (must pass all)
+## Testing checklist
 
-Run `python test_simulation.py` for automated simulation, plus manual steps:
-
-```powershell
-python test_simulation.py        # automated, <1 min
+```bash
+python windows/test_simulation.py  # automated, <1 min
 ```
 
-Manual (requires actual lid + Spotify):
-
-- [ ] **Spotify never opened, lid closed → sleeps immediately, same as without tool.**
-  - Start tool (`python stayawake.py --no-elevate`), verify `powercfg /q SCHEME_CURRENT SUB_BUTTONS` shows `0x00000001` (Sleep). Close lid — should sleep.
-
-- [ ] **Spotify playing, lid closed → stays awake indefinitely.**
-  - Play Spotify, wait ~12s for poll, verify `powercfg` shows `0x00000000` (Do nothing) and `SetThreadExecutionState` is held (check log: "Override ACTIVE"). Close lid — stays awake.
-
-- [ ] **Playing then paused, lid closed, wait 5+ min → sleeps and lid restored.**
-  - Start playing → pause, close lid, wait 5 min untouched. Should see log "Grace expired... forcing sleep" and `powercfg` back to `0x00000001`.
-
-- [ ] **Playing then paused, lid OPEN, wait 5+ min → does NOT force sleep.**
-  - Same but leave lid open — should restore lid but not sleep (log: "Lid is OPEN ... NOT sleeping").
-
-- [ ] **Kill process while override active → lid not stuck on Do nothing.**
-  - Play Spotify (override active, lid=0), kill via Task Manager, run `powercfg /q ...` or `python test_simulation.py` crash-recovery test — should auto-restore on next start (check log "Crash recovery"). Also `uninstall.ps1` restores as fallback.
-
-- [ ] **Hotkey toggles on/off reliably with beep.**
-  - Press `Ctrl+Alt+S` → beep, log "Hotkey toggle: enabled now False/True", state.json reflects. With disabled, lid should be restored even if Spotify playing.
+Manual (requires lid + Spotify):
+- [ ] Never opened, lid closed → sleeps immediately
+- [ ] Playing, lid closed → stays awake (lid 0,0, caffeinate/systemd-inhibit held)
+- [ ] App closed + lid closed → immediate sleep (lid 1,1, code stopped)
+- [ ] Paused + lid closed (no playback) → immediate sleep (lid 1,1)
+- [ ] Paused + lid open → immediate restore, no sleep
+- [ ] Kill process while override active → lid not stuck (crash recovery via state.json)
+- [ ] Hotkey `Ctrl+Shift+Space` toggles with `on.wav`/`off.wav` (debounced, suppress=True)
 
 ## Architecture notes
 
-- **Playback detection**: `winsdk` `GlobalSystemMediaTransportControlsSessionManager`, filtered to `SpotifyAB...!Spotify`, polled 12s. No API keys/OAuth.
-- **Lid state**: `RegisterPowerSettingNotification` with `GUID_LIDSWITCH_STATE_CHANGE (BA3E0F4D-...)`, tracked in hidden window (`WM_POWERBROADCAST`). Initial state assumed open until first notification (Data=1=open, 0=closed).
-- **Power**: `powrprof.dll` `PowerReadACValueIndex` / `PowerWriteACValueIndex` + `PowerSetActiveScheme` (fallback to `powercfg`). Original values captured at startup via `PowerGetActiveScheme`, persisted to `%APPDATA%\StayAwake\state.json` for crash recovery.
-- **Self-healing**: Periodic 60s check — if override active but lid !=0, re-apply; if inactive but stuck at 0, restore. Startup recovery reads marker and restores if previous run died mid-override.
-- **Silent**: `pythonw.exe` via Task Scheduler, `ShowWindow(SW_HIDE)` if console, no tray icon. Logging to `%APPDATA%\StayAwake\stayawake.log` + state.json.
+- **Playback:** Windows `GSMTC` (`SpotifyAB...!Spotify`), Mac `osascript -e 'tell app "Spotify" to player state'`, Linux `playerctl -p spotify status` / `dbus-send`, polled 12s active / 60s idle. `psutil` `is_spotify_running` distinguishes app closed vs paused.
+- **Lid:** Windows `RegisterPowerSettingNotification` (`GUID_LIDSWITCH`), Mac `ioreg AppleClamshellState` poll 3s, Linux `/proc/acpi/button/lid` poll 5s. `lid_known` gating for forced sleep.
+- **Power:** Windows `powrprof` + `powercfg` fallback, original lid saved to `%APPDATA%\StayAwake\state.json`; Mac `caffeinate -dimsu` + `pmset sleepnow`; Linux `systemd-inhibit` + `systemctl suspend`. Self-healing every 60s.
+- **Silent:** `pythonw`/`launchd`/`systemd --user`, `ShowWindow(SW_HIDE)`, no tray. Logs to `APPDIR/stayawake.log`.
 
 ## Uninstall
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File uninstall.ps1  # as admin
+# Windows
+powershell -ExecutionPolicy Bypass -File windows\uninstall.ps1  # admin
+# Mac
+bash mac/uninstall.sh
+# Linux
+bash linux/uninstall.sh
 ```
 
-Removes task, restores lid to original, kills process, keeps logs (delete `%APPDATA%\StayAwake` manually if desired).
+## Config (core/config.py / windows/mac/linux stayawake.py top)
+
+```python
+HOTKEY_STR = "ctrl+shift+space"  # Win/Linux, Mac maps to cmd+shift+space
+POLL_INTERVAL_SEC = 12
+GRACE_MINUTES = 5  # now immediate for flap shut, kept for docs
+BEEP_ENABLED = True
+```
+Override via CLI: `python windows/stayawake.py --grace 1 --poll 5 --no-beep`
 
 ## Troubleshooting
 
-- `powercfg /q` doesn't show Lid? Run `powercfg -attributes SUB_BUTTONS 5ca83367-6e45-459f-a27b-476b1d01c936 -ATTRIB_HIDE` (installer does this).
-- Hotkey 1409 error? Another app registered Ctrl+Alt+S — fallback to `keyboard` lib still works.
-- Lid Data inverted? Some hardware reports swapped — check log "Lid state change: Data=..." and invert `new_closed = (data_byte == 1)` if needed.
-- `SetSuspendState` fails? Needs admin; installer runs as admin. `--no-elevate` mode will log but not actually sleep.
-
-## Config (top of stayawake.py)
-
-```python
-HOTKEY_STR = "ctrl+alt+s"
-POLL_INTERVAL_SEC = 12
-GRACE_MINUTES = 5
-BEEP_ENABLED = True
-```
-Override via CLI: `python stayawake.py --grace 1 --poll 5 --no-beep`.
+- `powercfg /q` no Lid? `powercfg -attributes SUB_BUTTONS 5ca83367-6e45-459f-a27b-476b1d01c936 -ATTRIB_HIDE`
+- Hotkey 1409? Already registered — fallback to `keyboard` lib works, now debounced.
+- Lid Data inverted? Check log `Lid state change: Data=...`
+- `off.wav` silent start trimmed 0.09s, now 1.6s both — double-click `assets/sounds/off.wav` to test volume.

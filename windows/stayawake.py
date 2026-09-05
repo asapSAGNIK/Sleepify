@@ -24,6 +24,10 @@ ES_HOLD   = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
 ES_RELEASE= ES_CONTINUOUS
 # paths
 import os, sys, pathlib
+# Ensure core is importable when running as windows/stayawake.py directly
+try:
+    sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+except: pass
 APPDIR = pathlib.Path(os.environ.get("APPDATA", str(pathlib.Path.home()))) / "StayAwake"
 STATE_FILE = APPDIR / "state.json"
 LOG_FILE   = APPDIR / "stayawake.log"
@@ -440,12 +444,37 @@ def startup_recovery():
         return False
 
 # ─── BEEP / FEEDBACK ─────────────────────────────────────────────────────────
+def _play_sound(path):
+    """Try custom wav via winsound PlaySound, fallback to Beep."""
+    try:
+        p = pathlib.Path(path)
+        if p.exists():
+            import winsound
+            winsound.PlaySound(str(p), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+            log(f"Played custom sound {p}")
+            return True
+    except Exception as e:
+        log(f"custom sound failed {path}: {e}", "warning")
+    return False
+
 def beep_on():
     if not BEEP_ENABLED:
         return
+    # Try custom on.wav first (assets/sounds/on.wav) — handle core import failure separately
+    try:
+        from core.config import ON_SOUND
+        if _play_sound(ON_SOUND):
+            return
+    except Exception as e:
+        log(f"beep_on core import failed, trying alt path: {e}", "warning")
+    try:
+        alt = pathlib.Path(__file__).parent.parent / "assets" / "sounds" / "on.wav"
+        if _play_sound(alt):
+            return
+    except Exception as e:
+        log(f"beep_on alt path failed: {e}", "warning")
     try:
         import winsound
-        # two ascending beeps for ON
         winsound.Beep(1000, 150)
         time.sleep(0.08)
         winsound.Beep(1500, 150)
@@ -455,6 +484,18 @@ def beep_on():
 def beep_off():
     if not BEEP_ENABLED:
         return
+    try:
+        from core.config import OFF_SOUND
+        if _play_sound(OFF_SOUND):
+            return
+    except Exception as e:
+        log(f"beep_off core import failed, trying alt path: {e}", "warning")
+    try:
+        alt = pathlib.Path(__file__).parent.parent / "assets" / "sounds" / "off.wav"
+        if _play_sound(alt):
+            return
+    except Exception as e:
+        log(f"beep_off alt path failed: {e}", "warning")
     try:
         import winsound
         winsound.Beep(600, 400)
@@ -634,7 +675,10 @@ def _lid_monitor_thread():
         ]
 
     def wndproc(hwnd, msg, wparam, lparam):
-        global lid_closed, lid_known, enabled, override_active, pause_start_ts
+        global lid_closed, lid_known, enabled, override_active, pause_start_ts, _last_toggle_ts, _fallback_active
+        # If fallback is active, ignore WM_HOTKEY to avoid double toggle
+        if _fallback_active and msg == WM_HOTKEY:
+            return 0
         if msg == WM_POWERBROADCAST and wparam == PBT_POWERSETTINGCHANGE:
             try:
                 pbs = ctypes.cast(lparam, ctypes.POINTER(POWERBROADCAST_SETTING)).contents
@@ -651,6 +695,10 @@ def _lid_monitor_thread():
             return 1  # TRUE
         elif msg == WM_HOTKEY and wparam == HOTKEY_ID:
             try:
+                now = time.time()
+                if now - _last_toggle_ts < 0.7:
+                    return 0
+                _last_toggle_ts = now
                 enabled = not enabled
                 log(f"Hotkey toggle: enabled now {enabled}", "warning")
                 save_state()
@@ -770,14 +818,22 @@ def _lid_monitor_thread():
     user32.DestroyWindow(hwnd)
     user32.UnregisterClassW(className, hInstance)
 
+_last_toggle_ts = 0
+_fallback_active = False
 def _fallback_hotkey_thread():
     """Fallback using `keyboard` library if RegisterHotKey fails (e.g., no hwnd or conflict)."""
+    global _fallback_active
+    _fallback_active = True
     try:
         import keyboard
         log("Fallback hotkey thread using `keyboard` library")
 
         def on_hotkey():
-            global enabled, override_active, pause_start_ts
+            global enabled, override_active, pause_start_ts, _last_toggle_ts
+            now = time.time()
+            if now - _last_toggle_ts < 0.7:
+                return
+            _last_toggle_ts = now
             enabled = not enabled
             log(f"[fallback] Hotkey toggle enabled={enabled}", "warning")
             save_state()
@@ -793,10 +849,9 @@ def _fallback_hotkey_thread():
                     pause_start_ts = None
                     save_state()
 
-        keyboard.add_hotkey(HOTKEY_STR, on_hotkey, suppress=False)
-        log(f"keyboard.add_hotkey registered: {HOTKEY_STR}")
-        # Keep thread alive
-        keyboard.wait()  # blocks forever
+        keyboard.add_hotkey(HOTKEY_STR, on_hotkey, suppress=True, trigger_on_release=False)
+        log(f"keyboard.add_hotkey registered: {HOTKEY_STR} (suppress=True)")
+        keyboard.wait()
     except Exception as e:
         log(f"Fallback hotkey thread failed (keyboard lib): {e}\n{traceback.format_exc()}", "error")
 
@@ -883,49 +938,51 @@ def handle_poll_result(is_playing: bool):
         return
 
     # Was playing before, now not playing
-    # If app is closed (no session + process not running), restore immediately (no 5-min grace)
-    # This fixes "app closed still freezes" — user expects sleep when app closed
+    # App closed → immediate restore (no grace) — user wants code to stop when Spotify closed
     if raw_status is None and not app_running:
-        log("Spotify app closed (no session + no process) — restoring immediately, no grace", "info")
+        log("Spotify app closed — restoring immediately (code stops)", "info")
         if override_active:
             restore_original()
-            # Only force sleep if lid is actually closed (avoid open-lid sleep)
             if lid_closed and lid_known:
-                log("App closed + lid CLOSED — forcing sleep after immediate restore", "warning")
+                log("App closed + lid CLOSED — forcing sleep (normal sleep)", "warning")
                 time.sleep(1)
                 do_sleep()
             else:
-                log(f"App closed + lid OPEN (lid_closed={lid_closed}) — not sleeping", "info")
+                log(f"App closed + lid OPEN — not sleeping, back to default (code stopped)", "info")
         pause_start_ts = None
+        # Reset was_playing so next Spotify launch is fresh session
+        spotify_was_playing = False
         save_state()
-        # Reset was_playing so next session starts clean? Keep True per spec? But app closed means session ended.
-        # Keep was_playing True so that if app reopens and plays, grace still works? Actually app closed should reset was_playing?
-        # We keep it True to distinguish from never-played, but next play will reset.
         return
 
-    # Paused/stopped but app still running -> 5-min grace (between songs)
+    # App open but no playback (paused/stopped) — user wants immediate sleep if flap shut
+    if not app_running:
+        # Should not happen (already handled above), but fallback
+        if override_active:
+            restore_original()
+        pause_start_ts = None
+        save_state()
+        return
+
+    # App open, flap shut + no playback → immediate normal sleep (no 3-min grace)
+    if lid_closed and lid_known:
+        log("No playback + flap shut (lid CLOSED) — restoring immediately, normal sleep (code stops)", "info")
+        if override_active:
+            restore_original()
+            time.sleep(1)
+            do_sleep()
+        pause_start_ts = None
+        save_state()
+        return
+
+    # App open, flap open + no playback → silent stop (restore lid, no sleep, back to default)
+    # No grace when flap open — just restore and let Windows behave normally
     if override_active:
-        if pause_start_ts is None:
-            pause_start_ts = time.time()
-            log(f"Spotify paused — starting grace timer ({GRACE_MINUTES} min) at {time.ctime(pause_start_ts)} app_running={app_running} raw={raw_status}")
-            save_state()
-        else:
-            elapsed = time.time() - pause_start_ts
-            remaining = GRACE_SECONDS - elapsed
-            log(f"Grace running: {elapsed:.0f}s elapsed, {remaining:.0f}s remaining, lid_closed={lid_closed} (known={lid_known}) raw={raw_status} app_running={app_running}")
-            if elapsed >= GRACE_SECONDS:
-                log(f"Grace period expired ({GRACE_MINUTES} min). Restoring lid...", "warning")
-                restore_original()
-                if lid_closed and lid_known:
-                    log("Lid is CLOSED at grace expiry — forcing sleep", "warning")
-                    time.sleep(1)
-                    do_sleep()
-                elif lid_closed and not lid_known:
-                    log("Lid state unknown at grace expiry — NOT forcing sleep to avoid open-lid sleep", "warning")
-                else:
-                    log(f"Lid is OPEN at grace expiry — NOT sleeping (lid_closed={lid_closed})", "info")
-                pause_start_ts = None
-                save_state()
+        log("No playback + flap open — restoring lid to default, code stops (no sleep, will sleep on next lid close)", "info")
+        restore_original()
+    pause_start_ts = None
+    save_state()
+    return
 
 def self_healing_check():
     """Periodic check that current lid matches expected state. Fix if stuck."""
@@ -1061,9 +1118,25 @@ def main():
         while not _exit_flag.is_set():
             poll_count += 1
             try:
-                # Spotify polling
+                # Spotify lifecycle: tool is idle when Spotify not running (code stopped, no cost)
+                # Adaptive poll: 12s when Spotify running, 60s when not — saves power
+                if not is_spotify_running():
+                    if poll_count % 5 == 1:  # log occasionally when idle
+                        log("Spotify not running — tool idle (code stopped), normal sleep, polling every 60s", "info")
+                    # Ensure no override when idle
+                    if override_active:
+                        restore_original()
+                    # Sleep 60s but check every 5s for quick resume when Spotify starts
+                    for _ in range(60*10):
+                        if _exit_flag.is_set():
+                            break
+                        if _ % 50 == 0 and is_spotify_running():
+                            log("Spotify detected — resuming active poll", "info")
+                            break
+                        time.sleep(0.1)
+                    continue
+
                 is_playing = is_spotify_playing()
-                # is_playing may be None on error -> treat as not playing but log
                 if is_playing is None:
                     log("Spotify polling returned None (error) — treating as not playing", "warning")
                     is_playing = False
@@ -1071,13 +1144,11 @@ def main():
             except Exception as e:
                 log(f"Poll error: {e}\n{traceback.format_exc()}", "error")
 
-            # Self-healing every 60s
             if time.time() - last_heal > 60:
                 self_healing_check()
                 last_heal = time.time()
 
-            # Sleep with interruptibility for exit
-            for _ in range(POLL_INTERVAL_SEC * 10):  # check 10x per second for exit
+            for _ in range(POLL_INTERVAL_SEC * 10):
                 if _exit_flag.is_set():
                     break
                 time.sleep(0.1)
