@@ -2,10 +2,15 @@
 # Shared config — same logic on all platforms (Windows/Mac/Linux)
 import os, sys, pathlib
 
-# Hotkey — per-platform default (all use Ctrl+Shift+Space, Mac maps to Cmd+Shift+Space in platform layer)
-HOTKEY_MOD = 0x0002 | 0x0004          # MOD_CONTROL | MOD_SHIFT
-HOTKEY_VK = 0x20                       # VK_SPACE
-HOTKEY_STR = "ctrl+shift+space"
+# Hotkey — platform-specific: Windows/Linux Ctrl+Shift+Space, Mac Cmd+Shift+Space
+if sys.platform == "darwin":
+    HOTKEY_MOD = 0x0008 | 0x0004          # MOD_WIN (Cmd) | MOD_SHIFT on Mac
+    HOTKEY_VK = 0x20                       # VK_SPACE
+    HOTKEY_STR = "cmd+shift+space"
+else:
+    HOTKEY_MOD = 0x0002 | 0x0004          # MOD_CONTROL | MOD_SHIFT
+    HOTKEY_VK = 0x20                       # VK_SPACE
+    HOTKEY_STR = "ctrl+shift+space"
 
 POLL_INTERVAL_SEC = 12
 GRACE_MINUTES = 5
@@ -19,8 +24,9 @@ LIDACTION   = "5ca83367-6e45-459f-a27b-476b1d01c936"
 
 ES_CONTINUOUS        = 0x80000000
 ES_SYSTEM_REQUIRED   = 0x00000001
+ES_DISPLAY_REQUIRED  = 0x00000002
 ES_AWAYMODE_REQUIRED = 0x00000040
-ES_HOLD   = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
+ES_HOLD   = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_AWAYMODE_REQUIRED
 ES_RELEASE= ES_CONTINUOUS
 
 SPOTIFY_AUMID = "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify"

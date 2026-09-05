@@ -194,10 +194,12 @@ def is_spotify_running():
         import psutil
         for p in psutil.process_iter(['name']):
             try:
-                if 'spotify' in (p.info.get('name') or '').lower(): return True
+                n = (p.info.get('name') or '').lower()
+                if n == "spotify" or n == "spotify.exe":
+                    return True
             except: continue
         return False
-    except: return True
+    except: return False
 
 def get_spotify_raw_status():
     try:

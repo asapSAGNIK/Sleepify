@@ -19,8 +19,9 @@ LIDACTION   = "5ca83367-6e45-459f-a27b-476b1d01c936"
 # execution state flags
 ES_CONTINUOUS       = 0x80000000
 ES_SYSTEM_REQUIRED  = 0x00000001
+ES_DISPLAY_REQUIRED = 0x00000002
 ES_AWAYMODE_REQUIRED= 0x00000040
-ES_HOLD   = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED
+ES_HOLD   = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_AWAYMODE_REQUIRED
 ES_RELEASE= ES_CONTINUOUS
 # paths
 import os, sys, pathlib
@@ -561,20 +562,21 @@ def get_spotify_playback_status_sync():
         return None
 
 def is_spotify_running():
-    """Check if Spotify.exe process exists (app open vs closed)."""
+    """Check if Spotify.exe main process exists (not just launcher)."""
     try:
         import psutil
-        for p in psutil.process_iter(['name']):
+        for p in psutil.process_iter(['name', 'exe']):
             try:
                 n = (p.info.get('name') or '').lower()
-                if 'spotify' in n:
+                exe = (p.info.get('exe') or '').lower()
+                # Main Spotify process is Spotify.exe, not SpotifyLauncher.exe / SpotifyMigrator.exe
+                if n == "spotify.exe" or "spotify.exe" in exe:
                     return True
             except:
                 continue
         return False
     except Exception:
-        # fallback: assume running if we can't check
-        return True
+        return False
 
 def is_spotify_playing():
     """Returns True if Spotify is actively playing, False if paused/stopped/not found, None on error.
